@@ -56,6 +56,27 @@ def upload():
     if not file or not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
         return jsonify({"error": "Envie um arquivo Excel (.xlsx)."}), 400
 
+    # Campos do formulário — TODOS obrigatórios.
+    # A senha NÃO é normalizada com strip() para preservar o valor exato digitado.
+    email_form = (request.form.get("email") or "").strip()
+    senha_form = request.form.get("senha") or ""
+    cliente_form = (request.form.get("cliente") or "").strip()
+    loja_form = (request.form.get("loja") or "").strip()
+    frete_form = (request.form.get("frete") or "").strip()
+
+    obrigatorios = {
+        "E-mail do Bling": email_form,
+        "Senha do Bling": senha_form,
+        "Cliente": cliente_form,
+        "Loja": loja_form,
+        "Frete": frete_form,
+    }
+    faltando = [nome for nome, valor in obrigatorios.items() if not valor.strip()]
+    if faltando:
+        return jsonify({
+            "error": "Preencha todos os campos obrigatórios: " + ", ".join(faltando) + "."
+        }), 400
+
     # Salva upload (sanitiza nome para evitar path traversal e caracteres inválidos)
     nome_seguro = secure_filename(file.filename) or "planilha.xlsx"
     caminho = str(UPLOAD_DIR / nome_seguro)
@@ -70,13 +91,6 @@ def upload():
 
     _resultado_filename = None
     _resultado_bytes = None
-
-    # Campos opcionais (override do .env / padrões)
-    email_form = (request.form.get("email") or "").strip() or None
-    senha_form = request.form.get("senha") or None
-    cliente_form = (request.form.get("cliente") or "").strip() or None
-    loja_form = (request.form.get("loja") or "").strip() or None
-    frete_form = (request.form.get("frete") or "").strip() or None
 
     try:
         _bot_instance = BlingBot(

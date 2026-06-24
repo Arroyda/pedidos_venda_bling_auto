@@ -501,10 +501,31 @@ class BlingBot:
         return qtd_planejada, obs
 
     # ---------- salvar pedido ----------
-    def _salvar_pedido(self, idx_pedido: int, max_tentativas: int = 5) -> str | None:
-        for tentativa in range(1, max_tentativas + 1):
-            numero = self._capturar_numero_pedido()
+    def _limpar_numero(self) -> bool:
+        """Esvazia o campo de número do pedido para que o Bling atribua
+        automaticamente o PRÓXIMO número livre ao salvar.
 
+        É isto que evita o erro de 'número já cadastrado': em vez de o bot
+        escolher um número (que pode colidir), quem numera é o próprio Bling.
+        Alguns campos repopulam o valor via JavaScript ao perder o foco, por
+        isso, além do clear(), forçamos value='' diretamente no elemento.
+        """
+        try:
+            campo = self.driver.find_element(By.ID, "numero")
+            campo.clear()
+            if (campo.get_attribute("value") or "").strip():
+                self.driver.execute_script("arguments[0].value = '';", campo)
+            return True
+        except Exception:
+            return False
+
+    def _salvar_pedido(self, idx_pedido: int, max_tentativas: int = 6) -> str | None:
+        # Estratégia principal: deixar o campo de número VAZIO antes de salvar,
+        # para que o Bling gere automaticamente o próximo número disponível.
+        self._limpar_numero()
+        passo = 1  # usado apenas no fallback de avanço manual
+
+        for tentativa in range(1, max_tentativas + 1):
             try:
                 self._click_js(self.wait.until(EC.element_to_be_clickable((By.ID, "botaoSalvar"))))
             except Exception as e:
@@ -517,41 +538,66 @@ class BlingBot:
                 )
                 texto = _strip_accents(dialog.text).lower()
             except Exception:
-                numero = self._capturar_numero_pedido() or numero
-                self.log(f"✅ Pedido {idx_pedido} salvo! (Nº {numero})")
+                # Nenhum diálogo apareceu => pedido salvo. Captura o número que o
+                # Bling atribuiu para registrar na planilha de resultado.
+                numero = self._capturar_numero_pedido()
+                self.log(f"✅ Pedido {idx_pedido} salvo! (Nº {numero or '—'})")
                 return numero
 
             if any(kw in texto for kw in _ERRO_NUMERO_KEYWORDS):
-                self.log(f"⚠️ Conflito nº {idx_pedido} (tentativa {tentativa}/{max_tentativas})")
                 self._clicar_botao_ok(timeout=3)
                 time.sleep(0.5)
 
-                num_atual = self._capturar_numero_pedido()
-                if num_atual and num_atual.isdigit():
-                    novo = str(int(num_atual) + 1)
-                elif numero and numero.isdigit():
-                    novo = str(int(numero) + 1)
+                if tentativa <= 2:
+                    # Tenta novamente deixando o Bling renumerar sozinho.
+                    self.log(
+                        f"⚠️ Pedido {idx_pedido}: número em conflito "
+                        f"(tentativa {tentativa}/{max_tentativas}). "
+                        f"Deixando o Bling renumerar automaticamente…"
+                    )
+                    if not self._limpar_numero():
+                        self.log("⚠️ Campo 'numero' não encontrado para renumerar.")
+                        return None
                 else:
-                    self.log("⚠️ Não foi possível incrementar o número.")
-                    return None
+                    # Se a renumeração automática não resolveu (caso raro em que o
+                    # Bling insiste em sugerir um número ocupado), avança à frente
+                    # do bloco ocupado em saltos crescentes (1, 2, 4, 8…) em vez de
+                    # testar de um em um.
+                    num_atual = self._capturar_numero_pedido()
+                    base = int(num_atual) if (num_atual and num_atual.isdigit()) else None
+                    if base is None:
+                        self.log("⚠️ Não foi possível ler o número sugerido para avançar.")
+                        return None
+                    novo = str(base + passo)
+                    passo *= 2
+                    try:
+                        campo = self.driver.find_element(By.ID, "numero")
+                        campo.clear()
+                        campo.send_keys(novo)
+                        self.log(
+                            f"⚠️ Pedido {idx_pedido}: avançando número {num_atual} → {novo} "
+                            f"(tentativa {tentativa}/{max_tentativas})."
+                        )
+                    except Exception:
+                        self.log("⚠️ Campo 'numero' não encontrado.")
+                        return None
+                continue
 
-                try:
-                    campo = self.driver.find_element(By.ID, "numero")
-                    campo.clear()
-                    campo.send_keys(novo)
-                    numero = novo
-                    self.log(f"   Número ajustado: {num_atual} → {novo}")
-                except Exception:
-                    self.log("⚠️ Campo 'numero' não encontrado.")
-                    return None
             else:
+                # Diálogo que NÃO é conflito de número (confirmação ou outro aviso).
                 self._clicar_botao_ok(timeout=3)
                 time.sleep(1)
-                numero = self._capturar_numero_pedido() or numero
-                self.log(f"✅ Pedido {idx_pedido} salvo! (Nº {numero})")
-                return numero
+                numero = self._capturar_numero_pedido()
+                if numero:
+                    self.log(f"✅ Pedido {idx_pedido} salvo! (Nº {numero})")
+                    return numero
+                # Sem número capturado: provavelmente foi um aviso de validação
+                # (ex.: campo obrigatório). Não marca como salvo falsamente.
+                aviso = dialog.text.strip().replace("\n", " ")[:160]
+                self.log(f"⚠️ Pedido {idx_pedido}: aviso do Bling não tratado → {aviso}")
+                return None
 
-        self.log(f"❌ Pedido {idx_pedido}: conflito após {max_tentativas} tentativas.")
+        self.log(f"❌ Pedido {idx_pedido}: não foi possível salvar após {max_tentativas} tentativas.")
         return None
 
     # ---------- execução principal ----------
